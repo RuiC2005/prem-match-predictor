@@ -1,6 +1,8 @@
 from pathlib import Path
 import pickle
 
+import soccerdata as sd # pip install soccerdata if not installed 
+'https://soccerdata.readthedocs.io/en/latest/reference/espn.html'
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
@@ -133,9 +135,7 @@ def main():
     X = feat_df[feature_cols_num + feature_cols_cat]
     y = feat_df["FTR"]
 
-    split_idx = int(len(feat_df) * 0.8)
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+    X_train, X_test, y_train, y_test = train_test_split(X,y, test_size=0.2, shuffle=False)# should function same just less lines to deal with
 
     preprocessor = ColumnTransformer(
         transformers=[
