@@ -5,6 +5,7 @@ import soccerdata as sd # pip install soccerdata if not installed
 'https://soccerdata.readthedocs.io/en/latest/reference/espn.html'
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
