@@ -46,7 +46,7 @@ data/                   # Raw CSV data
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/prem-match-predictor.git
+git clone https://github.com/RuiC2005/prem-match-predictor.git
 cd prem-match-predictor
 
 ---
