@@ -1,216 +1,127 @@
-from pathlib import Path
-import pickle
+"""
+train_model.py — EPL Match Predictor, Training Pipeline v3
 
-import numpy as np
+Orchestrates the full pipeline:
+  1. Data loading & Elo computation   (data_loader.py)
+  2. Advanced feature engineering     (feature_engineering.py)
+  3. Model training, CV & comparison  (model_trainer.py)
+
+Run with:
+    python train_model.py
+
+Artifacts written to the working directory:
+  model.pkl, label_encoder.pkl, feature_columns.pkl,
+  teams.pkl, processed_matches.csv, model_results.pkl
+"""
+
+import warnings 
+
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, accuracy_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import LabelEncoder
 
-DATA_DIR = Path("data")
+from data_loader import load_and_prepare
+from feature_engineering import (
+    USE_BETTING_ODDS,
+    BASE_NUMERIC_COLS,
+    ODDS_COLS,
+    CAT_COLS,
+    add_features,
+)
+from model_trainer import (
+    get_models,
+    train_and_compare,
+    print_summary,
+    save_artifacts,
+)
 
-REQUIRED_COLUMNS = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"]
-
-
-def load_csvs():
-    files = sorted(DATA_DIR.glob("*.csv"))
-
-    if not files:
-        raise FileNotFoundError("No CSV files found in ./data. Put your EPL season CSVs there.")
-
-    dfs = []
-    for f in files:
-        df = pd.read_csv(f)
-        df["source_file"] = f.name
-        dfs.append(df)
-
-    return pd.concat(dfs, ignore_index=True)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 
-def normalize_dates(df):
-    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-    df = df.dropna(subset=["Date", "HomeTeam", "AwayTeam", "FTR"])
-    return df.sort_values("Date").reset_index(drop=True)
+def main() -> None:
+    print("=" * 60)
+    print("EPL Match Predictor — Training Pipeline v3")
+    print(f"Betting odds:     {'ON' if USE_BETTING_ODDS else 'OFF'}")
+    print("=" * 60)
 
+    # -----------------------------------------------------------------------
+    # 1. Load & prepare data
+    # -----------------------------------------------------------------------
+    df = load_and_prepare()
+    print(
+        f"\nLoaded {len(df)} matches "
+        f"from {df['Date'].min().date()} to {df['Date'].max().date()}"
+    )
 
-def add_team_form_features(df, window=5):
-    team_stats = {}
-    rows = []
+    # -----------------------------------------------------------------------
+    # 2. Feature engineering
+    # -----------------------------------------------------------------------
+    print("\nEngineering features...")
+    feat_df = add_features(df, window=5)
+    print(f"Feature matrix shape: {feat_df.shape}")
 
-    for _, row in df.iterrows():
-        home = row["HomeTeam"]
-        away = row["AwayTeam"]
+    # -----------------------------------------------------------------------
+    # 3. Build feature column lists
+    # -----------------------------------------------------------------------
+    numeric_cols = BASE_NUMERIC_COLS[:]
+    if USE_BETTING_ODDS:
+        numeric_cols += ODDS_COLS
 
-        def recent(team):
-            history = team_stats.get(team, [])
-            last = history[-window:]
+    # Keep only columns that actually exist (some may be missing from older data)
+    numeric_cols = [c for c in numeric_cols if c in feat_df.columns]
+    cat_cols = CAT_COLS
 
-            if not last:
-                return {
-                    "form_points": 0,
-                    "avg_scored": 0.0,
-                    "avg_conceded": 0.0,
-                }
+    X = feat_df[numeric_cols + cat_cols]
 
-            return {
-                "form_points": sum(x["points"] for x in last),
-                "avg_scored": np.mean([x["scored"] for x in last]),
-                "avg_conceded": np.mean([x["conceded"] for x in last]),
-            }
+    # -----------------------------------------------------------------------
+    # 4. Encode target
+    # [WHY global fit] Fit the encoder on ALL y before splitting so that all
+    #   three classes (A/D/H) are always known — prevents unseen-class errors
+    #   if one class is absent from a small fold.
+    # -----------------------------------------------------------------------
+    label_enc = LabelEncoder()
+    y_encoded = label_enc.fit_transform(feat_df["FTR"])  # A=0, D=1, H=2 (alphabetical)
+    y = pd.Series(y_encoded, index=feat_df.index)
 
-        home_recent = recent(home)
-        away_recent = recent(away)
-
-        rows.append(
-            {
-                "Date": row["Date"],
-                "HomeTeam": home,
-                "AwayTeam": away,
-                "FTR": row["FTR"],
-                "home_form_points": home_recent["form_points"],
-                "away_form_points": away_recent["form_points"],
-                "form_diff": home_recent["form_points"] - away_recent["form_points"],
-                "home_avg_goals_scored": home_recent["avg_scored"],
-                "away_avg_goals_scored": away_recent["avg_scored"],
-                "home_avg_goals_conceded": home_recent["avg_conceded"],
-                "away_avg_goals_conceded": away_recent["avg_conceded"],
-                "goal_scored_diff": home_recent["avg_scored"] - away_recent["avg_scored"],
-                "goal_conceded_diff": home_recent["avg_conceded"] - away_recent["avg_conceded"],
-                "is_weekend": 1 if row["Date"].dayofweek >= 5 else 0,
-            }
-        )
-
-        home_points = 3 if row["FTR"] == "H" else 1 if row["FTR"] == "D" else 0
-        away_points = 3 if row["FTR"] == "A" else 1 if row["FTR"] == "D" else 0
-
-        team_stats.setdefault(home, []).append(
-            {
-                "points": home_points,
-                "scored": row["FTHG"],
-                "conceded": row["FTAG"],
-            }
-        )
-
-        team_stats.setdefault(away, []).append(
-            {
-                "points": away_points,
-                "scored": row["FTAG"],
-                "conceded": row["FTHG"],
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-def main():
-    raw = load_csvs()
-
-    missing = [col for col in REQUIRED_COLUMNS if col not in raw.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
-    df = normalize_dates(raw)
-    feat_df = add_team_form_features(df)
-
-    feature_cols_num = [
-        "home_form_points",
-        "away_form_points",
-        "form_diff",
-        "home_avg_goals_scored",
-        "away_avg_goals_scored",
-        "home_avg_goals_conceded",
-        "away_avg_goals_conceded",
-        "goal_scored_diff",
-        "goal_conceded_diff",
-        "is_weekend",
-    ]
-
-    feature_cols_cat = ["HomeTeam", "AwayTeam"]
-
-    X = feat_df[feature_cols_num + feature_cols_cat]
-    y = feat_df["FTR"]
-
-    split_idx = int(len(feat_df) * 0.8)
+    # -----------------------------------------------------------------------
+    # 5. Temporal train / test split (80/20)
+    # [WHY temporal?] We must never train on future matches. Sorting by Date
+    #   and splitting at 80% means the model is always tested on "the future".
+    # -----------------------------------------------------------------------
+    split_idx = int(len(feat_df) * 0.80)
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
-    preprocessor = ColumnTransformer(
-        transformers=[
-            (
-                "num",
-                Pipeline(
-                    [
-                        ("imputer", SimpleImputer(strategy="constant", fill_value=0)),
-                        ("scaler", StandardScaler()),
-                    ]
-                ),
-                feature_cols_num,
-            ),
-            (
-                "cat",
-                Pipeline(
-                    [
-                        ("imputer", SimpleImputer(strategy="most_frequent")),
-                        ("onehot", OneHotEncoder(handle_unknown="ignore")),
-                    ]
-                ),
-                feature_cols_cat,
-            ),
-        ]
+    print(f"\nTrain: {len(X_train)} matches | Test: {len(X_test)} matches")
+    print(
+        f"Test window: {feat_df['Date'].iloc[split_idx].date()} "
+        f"to {feat_df['Date'].iloc[-1].date()}"
     )
 
-    model = Pipeline(
-        steps=[
-            ("preprocessor", preprocessor),
-            (
-                "classifier",
-              LogisticRegression(
-                    max_iter=1000,
-                    class_weight="balanced",
-                )
-            ),
-        ]
+    # -----------------------------------------------------------------------
+    # 6. Train & evaluate all models
+    # -----------------------------------------------------------------------
+    models = get_models(numeric_cols, cat_cols)
+    results = train_and_compare(
+        models, X_train, y_train, X_test, y_test,
+        label_enc=label_enc,
+        n_cv_splits=5,
     )
 
-    model.fit(X_train, y_train)
-    preds = model.predict(X_test)
+    # -----------------------------------------------------------------------
+    # 7. Pick best model & save artifacts
+    # -----------------------------------------------------------------------
+    best_name = print_summary(results)
+    print(f"\nSaving best model: {best_name}")
 
-    print("Test accuracy:", round(accuracy_score(y_test, preds), 4))
-    print("\nClassification report:\n")
-    print(classification_report(y_test, preds))
-
-    ohe = model.named_steps["preprocessor"].named_transformers_["cat"].named_steps["onehot"]
-    home_teams = list(ohe.categories_[0])
-    away_teams = list(ohe.categories_[1])
-
-    ordered_columns = (
-        feature_cols_num
-        + [f"home_team_{t}" for t in home_teams]
-        + [f"away_team_{t}" for t in away_teams]
+    save_artifacts(
+        best_pipeline=results[best_name]["pipeline"],
+        label_enc=label_enc,
+        numeric_cols=numeric_cols,
+        cat_cols=cat_cols,
+        use_betting_odds=USE_BETTING_ODDS,
+        feat_df=feat_df,
+        results=results,
     )
-
-    with open("model.pkl", "wb") as f:
-        pickle.dump(model, f)
-
-    with open("feature_columns.pkl", "wb") as f:
-        pickle.dump(
-            {
-                "ordered_columns": ordered_columns,
-                "home_team_dummies": home_teams,
-                "away_team_dummies": away_teams,
-            },
-            f,
-        )
-
-    teams = sorted(set(feat_df["HomeTeam"]).union(set(feat_df["AwayTeam"])))
-    with open("teams.pkl", "wb") as f:
-        pickle.dump(teams, f)
-
-    feat_df.to_csv("processed_matches.csv", index=False)
-    print("\nSaved: model.pkl, feature_columns.pkl, teams.pkl, processed_matches.csv")
 
 
 if __name__ == "__main__":
