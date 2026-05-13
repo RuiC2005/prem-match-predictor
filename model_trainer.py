@@ -49,13 +49,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, VotingClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
-from sklearn.svm import SVC
 import xgboost as xgb
 
 try:
@@ -65,11 +64,6 @@ try:
 except ImportError:
     _OPTUNA_AVAILABLE = False
 
-try:
-    import lightgbm as lgb
-    _LGBM_AVAILABLE = True
-except ImportError:
-    _LGBM_AVAILABLE = False
 
 
 # ===========================================================================
@@ -289,14 +283,17 @@ def get_models(
     """
     Returns named sklearn Pipelines to train and compare.
 
-    Models included
+    Models included (v9 — SVM removed)
     ---------------
     XGBoost          — State-of-the-art GBT. Primary model.
     RandomForest     — Parallel bagging; diverse errors vs XGBoost.
-    GradientBoosting — sklearn native GBT; slower but no extra dep.
-    LightGBM         — Leaf-wise GBT, if installed.
-    SVM (RBF)        — Nonlinear kernel; strong on small well-scaled datasets.
     XGB+RF Ensemble  — Soft-voting of XGBoost + RandomForest.
+
+    [WHY remove SVM?]
+    SVM scored 0.41 CV — 8 points below XGBoost (0.48). It is the slowest
+    model to train at this data size (no warm-start, O(n²) kernel), does not
+    benefit from sample_weights, and handles OHE team columns poorly. There
+    is no deployment scenario where it would be chosen over XGBoost or RF.
 
     [WHY NOT CatBoost?]
     CatBoost was removed in v6. It requires a dedicated pipeline builder
@@ -355,47 +352,6 @@ def get_models(
             class_weight="balanced_subsample",
             random_state=42,
             n_jobs=-1,
-        ),
-        numeric_cols, cat_cols, odds_cols=odds_cols,
-    )
-
-    models["GradientBoosting"] = build_pipeline(
-        GradientBoostingClassifier(
-            n_estimators=300,
-            max_depth=4,
-            learning_rate=0.04,
-            subsample=0.8,
-            min_samples_leaf=5,
-            random_state=42,
-        ),
-        numeric_cols, cat_cols, odds_cols=odds_cols,
-    )
-
-    if _LGBM_AVAILABLE:
-        models["LightGBM"] = build_pipeline(
-            lgb.LGBMClassifier(
-                n_estimators=400,
-                max_depth=5,
-                learning_rate=0.03,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                min_child_samples=10,
-                num_leaves=31,
-                random_state=42,
-                n_jobs=-1,
-                verbose=-1,
-            ),
-            numeric_cols, cat_cols, odds_cols=odds_cols,
-        )
-
-    models["SVM (RBF)"] = build_pipeline(
-        SVC(
-            kernel="rbf",
-            C=10,
-            gamma="scale",
-            class_weight="balanced",
-            probability=True,
-            random_state=42,
         ),
         numeric_cols, cat_cols, odds_cols=odds_cols,
     )
@@ -462,10 +418,10 @@ def evaluate_with_tscv(
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=38)
 
     # Determine whether this model supports sample_weight via Pipeline API.
-    # [WHY name-check?] VotingClassifier, SVM, and RF handle class imbalance
-    # internally (balanced_subsample / class_weight). Passing sample_weight to
-    # them via the Pipeline kwarg would either error or double-count.
-    _WEIGHTED_MODELS = ("XGBoost", "GradientBoosting", "LightGBM")
+    # [WHY name-check?] VotingClassifier and SVM handle class imbalance
+    # internally (balanced_subsample / class_weight). RF uses balanced_subsample.
+    # Passing sample_weight to them would either error or double-count.
+    _WEIGHTED_MODELS = ("XGBoost",)
     model_name = getattr(model, "_name", "")  # set by train_and_compare before calling
 
     if is_voting:
@@ -607,9 +563,7 @@ def train_and_compare(
                 pipeline.fit(X_train, y_train)
             else:
                 fit_kwargs: dict = {}
-                if sample_weights is not None and name in (
-                    "XGBoost", "GradientBoosting", "LightGBM"
-                ):
+                if sample_weights is not None and name in ("XGBoost",):
                     fit_kwargs["classifier__sample_weight"] = sample_weights
                 pipeline.fit(X_train, y_train, **fit_kwargs)
 

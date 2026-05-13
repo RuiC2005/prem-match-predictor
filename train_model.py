@@ -86,7 +86,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # Top-level knobs — edit these to control the training run
 # ---------------------------------------------------------------------------
 TUNE_XGBOOST  = True   # Run Optuna tuning before training (~5 min)
-OPTUNA_TRIALS = 40     # Number of Optuna trials (40 is fast; use 80+ for best results)
+OPTUNA_TRIALS = 80     # Number of Optuna trials (80 gives TPE enough budget for 9-dim space)
 # [WHY 0.999 not 0.97?] With 2405 training rows, decay=0.97 drives the oldest
 # matches to weight 0.97^2404 ≈ 10^-32, which underflows float64 and crashes
 # XGBoost's multiclass solver ("sum_weight >= kRtEps" error).
